@@ -1,0 +1,1 @@
+# Emit ticks every N seconds to a Kafka topic
