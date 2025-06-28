@@ -18,7 +18,7 @@ st.set_page_config(
 # API Configuration
 API_BASE_URL = "http://localhost:8000"
 
-@st.cache_data(ttl=5)  # Shorter cache for more dynamic updates
+@st.cache_data(ttl=1)  # Faster cache for real-time data
 def fetch_regions():
     """Fetch available regions from API"""
     try:
@@ -29,7 +29,7 @@ def fetch_regions():
     except:
         return []
 
-@st.cache_data(ttl=5)  # Shorter cache for more dynamic updates
+@st.cache_data(ttl=1)
 def fetch_dmas_for_region(region):
     """Fetch DMAs for a specific region"""
     try:
@@ -40,10 +40,12 @@ def fetch_dmas_for_region(region):
     except:
         return []
 
-@st.cache_data(ttl=5)  # Shorter cache for more dynamic updates
-def fetch_dma_flow_data(region, dma_id, limit=500):  # Increased limit for 7-day view
-    """Fetch flow data for a specific DMA"""
+@st.cache_data(ttl=1)
+def fetch_dma_flow_data(region, dma_id):
+    """Fetch exactly 7 days of flow data (672 points = 96 points/day * 7 days)"""
     try:
+        # Fixed limit for exactly 7 days of data
+        limit = 672  # 96 points per day * 7 days
         response = requests.get(f"{API_BASE_URL}/flow-data/{region}/{dma_id}?limit={limit}")
         if response.status_code == 200:
             return response.json()["data"]
@@ -78,7 +80,8 @@ def fetch_kafka_logs(service):
         if response.status_code == 200:
             return response.json()["logs"]
         return []
-    except:
+    except Exception as e:
+        st.error(f"Error fetching logs: {str(e)}")
         return []
 
 def main():
@@ -91,15 +94,13 @@ def main():
     
     with tab1:
         dashboard_tab()
-    
     with tab2:
         kafka_control_tab()
-    
     with tab3:
         logs_tab()
 
 def dashboard_tab():
-    """Main dashboard tab with 7-day flow visualization"""
+    """Main dashboard tab with real-time 7-day flow visualization"""
     st.sidebar.header("🔧 Dashboard Controls")
     
     # Get regions
@@ -138,128 +139,143 @@ def dashboard_tab():
         st.info("👆 Please select a DMA to view data")
         return
     
-    # Data settings
-    data_limit = st.sidebar.slider("Data Points (for 7-day view)", 100, 1000, 500)
-    
-    # Auto-refresh settings
+    # Real-time settings
     auto_refresh = st.sidebar.checkbox("Auto Refresh", value=True)
-    refresh_interval = st.sidebar.selectbox("Refresh Interval", [5, 10, 15, 30], index=1)
+    refresh_interval = st.sidebar.selectbox("Refresh Interval", [1, 2, 5, 10], index=0)
     
     # Manual refresh button
     if st.sidebar.button("🔄 Refresh Now"):
-        # Clear cache to force fresh data
         st.cache_data.clear()
         st.rerun()
     
     # Main content
     st.header(f"📊 Region {selected_region.upper()} - DMA {selected_dma}")
     
-    # Fetch data for selected DMA
-    flow_data = fetch_dma_flow_data(selected_region, selected_dma, data_limit)
+    # Fetch exactly 7 days of data
+    flow_data = fetch_dma_flow_data(selected_region, selected_dma)
     
     if not flow_data:
         st.warning("No data available for this DMA")
         return
     
-    # Create DataFrame and sort by timestamp
+    # Create DataFrame and PROPERLY sort by timestamp
     df = pd.DataFrame(flow_data)
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df = df.sort_values('timestamp')
+    df['timestamp'] = pd.to_datetime(df['timestamp'], dayfirst=True)
     
-    # Two columns: Latest Records (smaller) and Big Chart (larger)
-    col1, col2 = st.columns([1, 3])  # 1:3 ratio for more chart space
+    # CRITICAL FIX: Sort by timestamp ASCENDING (oldest first) for proper line plotting
+    df = df.sort_values('timestamp', ascending=True).reset_index(drop=True)
+    
+    # Remove any duplicate timestamps to avoid weird lines
+    df = df.drop_duplicates(subset=['timestamp']).reset_index(drop=True)
+    
+    # FIRST ROW: Latest Records + Statistics (Horizontal Layout)
+    st.subheader("📋 Latest Data & Statistics")
+    
+    # Create 4 columns for horizontal layout
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        st.subheader("📋 Latest Records")
-        # Display latest 10 records
-        display_df = df.head(10)[['timestamp', 'flow']].copy()
-        display_df['timestamp'] = display_df['timestamp'].dt.strftime('%m-%d %H:%M')
-        st.dataframe(display_df, use_container_width=True, height=300)
-        
-        # Latest value
-        latest = df.iloc[0]  # Most recent (first after sorting DESC from API)
-        st.metric(
-            "Latest Flow", 
-            f"{latest['flow']:.2f}",
-            delta=None
-        )
-        
-        # Statistics
-        st.subheader("📈 Statistics")
-        st.metric("Average", f"{df['flow'].mean():.2f}")
-        st.metric("Max", f"{df['flow'].max():.2f}")
-        st.metric("Min", f"{df['flow'].min():.2f}")
-        
-        # Data info
-        st.info(f"📊 **{len(df)}** data points\n\n📅 From: {df['timestamp'].min().strftime('%Y-%m-%d %H:%M')}\n\n🕐 To: {df['timestamp'].max().strftime('%Y-%m-%d %H:%M')}")
+        st.markdown("**📊 Latest Records**")
+        # Display latest 5 records (from the end of sorted data)
+        display_df = df.tail(5)[['timestamp', 'flow']].copy()
+        display_df['timestamp'] = display_df['timestamp'].dt.strftime('%d-%m %H:%M')
+        st.dataframe(display_df, use_container_width=True, height=200)
     
     with col2:
-        st.subheader("📈 7-Day Flow Visualization")
-        
-        # Create the big beautiful plot like your CSV tool
-        fig = go.Figure()
-        
-        # Main flow line with better styling
-        fig.add_trace(go.Scatter(
-            x=df['timestamp'],
-            y=df['flow'],
-            mode='lines',
-            line=dict(color='#1f77b4', width=2),  # Nice blue color
-            name='Flow Rate',
-            showlegend=False,
-            hovertemplate='<b>Time:</b> %{x}<br><b>Flow:</b> %{y:.2f}<extra></extra>'
-        ))
-        
-        # Add markers for recent data points (last 20 points)
-        recent_df = df.head(20)
-        fig.add_trace(go.Scatter(
-            x=recent_df['timestamp'],
-            y=recent_df['flow'],
-            mode='markers',
-            marker=dict(
-                color='#ff7f0e',  # Orange for recent points
-                size=6,
-                line=dict(width=1, color='white')
-            ),
-            name='Recent Data',
-            showlegend=True,
-            hovertemplate='<b>Recent:</b> %{x}<br><b>Flow:</b> %{y:.2f}<extra></extra>'
-        ))
-        
-        # Beautiful layout like your CSV tool
-        fig.update_layout(
-            title=f"Real-time Flow Data - DMA {selected_dma}",
-            xaxis_title="Time",
-            yaxis_title="Flow Rate",
-            height=600,  # Big height for better visibility
-            plot_bgcolor='rgba(240,240,240,0.8)',  # Light background
-            paper_bgcolor='white',
-            legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="right",
-                x=1
-            ),
-            xaxis=dict(
-                tickformat='%m-%d\n%H:%M',  # Date and time format
-                dtick=3600000 * 6,  # 6-hour intervals
-                gridcolor='rgba(128,128,128,0.3)',
-                showgrid=True
-            ),
-            yaxis=dict(
-                gridcolor='rgba(128,128,128,0.3)',
-                showgrid=True
-            ),
-            hovermode='x unified'
-        )
-        
-        # Display the big beautiful chart
-        st.plotly_chart(fig, use_container_width=True, key=f"flow_chart_{selected_region}_{selected_dma}_{int(time.time())}")
-        
-        # Time range info
+        st.markdown("**🕐 Current Status**")
+        latest = df.iloc[-1]  # Most recent (last in sorted data)
+        st.metric("Latest Flow", f"{latest['flow']:.2f}")
+        st.metric("Data Points", f"{len(df)}")
+    
+    with col3:
+        st.markdown("**📈 Statistics**")
+        st.metric("Average", f"{df['flow'].mean():.2f}")
+        st.metric("Max", f"{df['flow'].max():.2f}")
+    
+    with col4:
+        st.markdown("**📅 Time Range**")
         time_span = df['timestamp'].max() - df['timestamp'].min()
-        st.info(f"📊 **Data Span:** {time_span.days} days, {time_span.seconds//3600} hours")
+        st.metric("Days", f"{time_span.days}")
+        st.metric("Hours", f"{time_span.seconds//3600}")
+        st.info(f"From: {df['timestamp'].min().strftime('%d-%m %H:%M')}")
+        st.info(f"To: {df['timestamp'].max().strftime('%d-%m %H:%M')}")
+    
+    # Add some spacing
+    st.markdown("---")
+    
+    # SECOND ROW: Full-Width 7-Day Plot
+    st.subheader("📈 7-Day Real-Time Flow Visualization")
+    
+    # Create the FIXED plot
+    fig = go.Figure()
+    
+    # Main flow line - PROPERLY SORTED DATA
+    fig.add_trace(go.Scatter(
+        x=df['timestamp'],
+        y=df['flow'],
+        mode='lines+markers',
+        line=dict(color='#1f77b4', width=2),
+        marker=dict(size=3, color='#1f77b4'),
+        name='Flow Rate',
+        showlegend=True,
+        hovertemplate='<b>Time:</b> %{x}<br><b>Flow:</b> %{y:.2f}<extra></extra>'
+    ))
+    
+    # Highlight recent points (last 10% of data)
+    recent_count = max(10, len(df) // 10)
+    recent_df = df.tail(recent_count)
+    fig.add_trace(go.Scatter(
+        x=recent_df['timestamp'],
+        y=recent_df['flow'],
+        mode='markers',
+        marker=dict(
+            color='#ff7f0e',
+            size=6,
+            line=dict(width=1, color='white')
+        ),
+        name='Recent Data',
+        showlegend=True,
+        hovertemplate='<b>Recent:</b> %{x}<br><b>Flow:</b> %{y:.2f}<extra></extra>'
+    ))
+    
+    # FIXED layout with CORRECTED DATE FORMAT
+    fig.update_layout(
+        title=f"Real-time Flow Data - DMA {selected_dma} (7 Days)",
+        xaxis_title="Date & Time",
+        yaxis_title="Flow Rate",
+        height=700,
+        plot_bgcolor='rgba(240,240,240,0.8)',
+        paper_bgcolor='white',
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        ),
+        xaxis=dict(
+            # FIXED: Use DD-MM format with proper day-first parsing
+            tickformat='%d %b<br>%H:%M',
+            nticks=10,  # Maximum 10 labels on x-axis
+            gridcolor='rgba(128,128,128,0.3)',
+            showgrid=True,
+            tickangle=0,
+            # Ensure proper range
+            range=[df['timestamp'].min(), df['timestamp'].max()]
+        ),
+        yaxis=dict(
+            gridcolor='rgba(128,128,128,0.3)',
+            showgrid=True
+        ),
+        hovermode='x unified'
+    )
+    
+    # Display the FIXED full-width chart
+    chart_key = f"flow_chart_{selected_region}_{selected_dma}_{int(time.time())}"
+    st.plotly_chart(fig, use_container_width=True, key=chart_key)
+    
+    # Show data info
+    st.info(f"📊 Showing {len(df)} data points (7 days) from {df['timestamp'].min().strftime('%Y-%m-%d %H:%M')} to {df['timestamp'].max().strftime('%Y-%m-%d %H:%M')}")
     
     # Auto-refresh logic with cache clearing
     if auto_refresh:
@@ -272,7 +288,6 @@ def dashboard_tab():
             time.sleep(1)
         
         countdown_placeholder.empty()
-        
         # Clear cache and refresh
         st.cache_data.clear()
         st.rerun()
@@ -386,24 +401,48 @@ def kafka_control_tab():
                 st.rerun()
 
 def logs_tab():
-    """Logs viewing tab"""
-    st.header("📋 Service Logs (Auto-refresh)")
+    """FIXED Logs viewing tab with proper auto-refresh"""
+    st.header("📋 Service Logs (Auto-refresh every 2 seconds)")
     
     # Service selection
-    service = st.selectbox("Select Service", ["producer", "consumer"])
+    service = st.selectbox("Select Service", ["producer", "consumer"], key="log_service_select")
+    
+    # Create containers for logs
+    logs_container = st.container()
     
     # Fetch and display logs
-    logs = fetch_kafka_logs(service)
+    try:
+        logs = fetch_kafka_logs(service)
+        
+        with logs_container:
+            if logs:
+                st.subheader(f"📝 {service.title()} Logs (Last 20 lines)")
+                
+                # Display logs in a scrollable text area
+                log_text = "\n".join(logs)
+                st.text_area(
+                    f"{service.title()} Output:",
+                    value=log_text,
+                    height=400,
+                    key=f"logs_{service}_{int(time.time())}"
+                )
+                
+                # Show log count
+                st.info(f"📊 Showing {len(logs)} log lines")
+            else:
+                st.warning(f"No logs available for {service}")
+                st.info("Make sure the service is running and generating logs.")
     
-    if logs:
-        st.subheader(f"📝 {service.title()} Logs")
-        log_text = "\n".join(logs)
-        st.code(log_text, language="text")
-    else:
-        st.info(f"No logs available for {service}")
+    except Exception as e:
+        st.error(f"Error fetching logs: {str(e)}")
     
-    # Auto-refresh every 3 seconds
-    time.sleep(3)
+    # Auto-refresh countdown
+    refresh_placeholder = st.empty()
+    for i in range(2, 0, -1):
+        refresh_placeholder.info(f"🔄 Refreshing logs in {i} seconds...")
+        time.sleep(1)
+    
+    refresh_placeholder.empty()
     st.rerun()
 
 if __name__ == "__main__":

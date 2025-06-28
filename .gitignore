@@ -16,3 +16,4 @@ producer/__pycache__
 consumer/__pycache__
 db/
 configs/
+test.py

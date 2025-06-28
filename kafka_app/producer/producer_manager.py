@@ -64,6 +64,6 @@ def start_producers_from_csv(csv_file_path, interval_seconds=1):
         raise
 
 if __name__ == "__main__":
-    # Start producers for E1 data
-    start_producers_from_csv('data/E1 2016_2017.csv', interval_seconds=5)
+    # Start producers for E3 data
+    start_producers_from_csv('data/E3 2016_2017.csv', interval_seconds=1)
 
