@@ -8,7 +8,7 @@ import signal
 import os
 import math
 from datetime import datetime, timedelta
-from .db import get_latest_flow_data, get_flow_data_by_time_range, get_all_regions
+from .db import get_latest_flow_data, get_flow_data_by_time_range, get_all_regions, get_forecast_data, get_available_forecast_dates
 from .kafka_controller import KafkaController
 import uvicorn
 import asyncpg
@@ -173,6 +173,32 @@ async def get_kafka_logs(service: str, lines: int = 50):
         return {"success": True, "logs": logs}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+# Add these new endpoints to your existing main.py
 
+@app.get("/forecast-data/{region}/{dma_id}")
+async def get_dma_forecast_data(region: str, dma_id: str, forecast_date: Optional[str] = None):
+    """Get forecast data for a specific DMA and date"""
+    try:
+        if not forecast_date:
+            # Get latest forecast date
+            dates = await get_available_forecast_dates(region, dma_id)
+            if not dates:
+                return {"success": True, "data": []}
+            forecast_date = dates[0]
+        
+        data = await get_forecast_data(region, dma_id, forecast_date)
+        return {"success": True, "data": data, "forecast_date": forecast_date}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/forecast-dates/{region}/{dma_id}")
+async def get_forecast_dates(region: str, dma_id: str):
+    """Get available forecast dates for a DMA"""
+    try:
+        dates = await get_available_forecast_dates(region, dma_id)
+        return {"success": True, "dates": dates}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
