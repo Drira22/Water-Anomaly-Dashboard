@@ -17,3 +17,5 @@ consumer/__pycache__
 db/
 configs/
 test.py
+streamlit_backup.py
+node_modules/

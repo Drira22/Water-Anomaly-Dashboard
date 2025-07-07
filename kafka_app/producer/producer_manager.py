@@ -16,7 +16,8 @@ def start_producers_from_csv(csv_file_path, interval_seconds=1):
     
     try:
         # Read CSV file
-        df = pd.read_csv(csv_file_path)
+        df = pd.read_csv(csv_file_path, dayfirst=True)
+        df['Datetime'] = pd.to_datetime(df['Date'].astype(str) + ' ' + df['Time'], dayfirst=True)
         print(f"[Manager] Loaded {len(df)} records from CSV")
         
         # Extract region from filename (e.g., "E1 2016_2017.csv" -> "e1")
@@ -65,5 +66,4 @@ def start_producers_from_csv(csv_file_path, interval_seconds=1):
 
 if __name__ == "__main__":
     # Start producers for E3 data
-    start_producers_from_csv('data/E3 2016_2017.csv', interval_seconds=0.2)
-
+    start_producers_from_csv('data/E3 2016_2017.csv', interval_seconds=0.5)

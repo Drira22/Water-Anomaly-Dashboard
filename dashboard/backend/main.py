@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict
 import asyncio
@@ -12,13 +12,18 @@ from .db import get_latest_flow_data, get_flow_data_by_time_range, get_all_regio
 from .kafka_controller import KafkaController
 import uvicorn
 import asyncpg
+from .websocket_manager import manager 
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
+
+
 
 app = FastAPI(title="Water Flow Monitoring API", version="1.0.0")
 
 # Add CORS middleware for Streamlit
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # or restrict to ["http://localhost:5173"]
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -199,6 +204,41 @@ async def get_forecast_dates(region: str, dma_id: str):
         return {"success": True, "dates": dates}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+@app.websocket("/ws/flow/{region}/{dma_id}")
+async def flow_websocket(websocket: WebSocket, region: str, dma_id: str):
+    await websocket.accept()  # ✅ Required to establish connection
+    print(f"[WebSocket] ✅ New connection: {region}_{dma_id}")
+    await manager.connect(websocket, region, dma_id)
+    try:
+        while True:
+            message = await websocket.receive_text()
+            print(f"[WebSocket] 🔁 Received from client: {message}")
+    except WebSocketDisconnect:
+        print(f"[WebSocket] ⚠️ Client disconnected from {region}_{dma_id}")
+        await manager.disconnect(websocket, region, dma_id)
+
+class BroadcastRequest(BaseModel):
+    region: str
+    dma_id: str
+    timestamp: str
+    flow: float
+
+@app.post("/internal/broadcast")
+async def internal_broadcast(data: BroadcastRequest):
+    message = {
+        "timestamp": data.timestamp,
+        "flow": data.flow,
+        "region": data.region,
+        "dma_id": data.dma_id
+    }
+    try:
+        await manager.broadcast(data.region, data.dma_id, message)
+        print(f"[API Broadcast] ✅ Sent to {data.region}_{data.dma_id}")
+        return {"success": True}
+    except Exception as e:
+        print(f"[API Broadcast] ❌ Failed to send: {e}")
+        return {"success": False, "error": str(e)}
     
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

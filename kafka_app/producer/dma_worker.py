@@ -2,6 +2,7 @@ import json
 import threading
 import time
 from kafka import KafkaProducer
+import pandas as pd
 
 class DMAProducerWorker(threading.Thread):
     def __init__(self, dma_id, dma_df, topic_name, region, interval_seconds=1, bootstrap_servers='localhost:9092'):
@@ -24,7 +25,7 @@ class DMAProducerWorker(threading.Thread):
 
         try:
             for idx, (_, row) in enumerate(self.dma_df.iterrows()):
-                timestamp = f"{row['Date']} {row['Time']}"
+                timestamp = row['Datetime'].strftime('%Y-%m-%d %H:%M:%S')
                 message = {
                     'dma_id': str(row['DMA']),
                     'region': self.region,
