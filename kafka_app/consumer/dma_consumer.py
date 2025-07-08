@@ -42,16 +42,34 @@ def broadcast_via_api(region: str, dma_id: str, message: dict):
             timeout=2
         )
         if response.status_code == 200:
-            print(f"[API Broadcast] ✅ Sent to {region}_{dma_id}")
+            print(f"[API Broadcast] ✅ Sent flow data to {region}_{dma_id}")
         else:
             print(f"[API Broadcast] ❌ Failed: {response.status_code} {response.text}")
     except Exception as e:
         print(f"[API Broadcast] ❌ Exception: {e}")
 
+def broadcast_forecast_via_api(region: str, dma_id: str, forecast_data: list, forecast_date: str):
+    """Broadcast forecast data via WebSocket"""
+    try:
+        response = requests.post(
+            "http://localhost:8000/internal/broadcast-forecast",
+            json={
+                "region": region,
+                "dma_id": dma_id,
+                "forecast_date": forecast_date,
+                "forecast_data": forecast_data
+            },
+            timeout=5
+        )
+        if response.status_code == 200:
+            print(f"[Forecast Broadcast] ✅ Sent forecast to {region}_{dma_id}")
+        else:
+            print(f"[Forecast Broadcast] ❌ Failed: {response.status_code} {response.text}")
+    except Exception as e:
+        print(f"[Forecast Broadcast] ❌ Exception: {e}")
 
 def main():
     print("[Consumer] Starting DMA consumer with forecasting + WebSocket...")
-
     # ✅ Wait a few seconds to allow frontend WebSocket clients to connect
     print("⏳ Waiting 3 seconds for WebSocket clients to connect...")
     time.sleep(3)
@@ -81,16 +99,37 @@ def main():
 
                 # === Forecasting ===
                 if should_trigger_forecast(msg['timestamp']):
-                    print(f"🔮 Forecast triggered for DMA {msg['dma_id']}")
+                    print(f"🔮 Forecast triggered for DMA {msg['dma_id']} at {msg['timestamp']}")
+                    
                     if forecasting_service.is_model_ready():
                         historical = get_historical_data(region, msg['dma_id'], 672)
+                        
                         if len(historical) >= 672:
                             forecasts = forecasting_service.forecast_next_day(historical)
+                            
                             if forecasts:
                                 future_timestamps = generate_forecast_timestamps(msg['timestamp'])
                                 forecast_data = list(zip(future_timestamps, forecasts))
+                                
+                                # Save to database
                                 insert_forecast(region, msg['dma_id'], pd.to_datetime(msg['timestamp']).date(), forecast_data)
                                 print(f"✅ Forecast saved for {msg['dma_id']}")
+                                
+                                # 🚀 NEW: Broadcast forecast data via WebSocket
+                                forecast_for_broadcast = [
+                                    {
+                                        "timestamp": ts.isoformat(),
+                                        "flow": float(flow)
+                                    }
+                                    for ts, flow in forecast_data
+                                ]
+                                
+                                broadcast_forecast_via_api(
+                                    region, 
+                                    msg['dma_id'], 
+                                    forecast_for_broadcast,
+                                    str(pd.to_datetime(msg['timestamp']).date())
+                                )
                             else:
                                 print(f"❌ Forecast failed for {msg['dma_id']}")
                         else:
@@ -105,7 +144,7 @@ def main():
                 if len(batches[region]) >= BATCH_SIZE:
                     insert_messages(region, batches[region])
                     print(f"[Consumer] Inserted {len(batches[region])} to DB ({region})")
-
+                    
                     for m in batches[region]:
                         broadcast_via_api(region, m['dma_id'], {
                             "timestamp": pd.to_datetime(m["timestamp"]).isoformat(),
@@ -113,7 +152,7 @@ def main():
                             "region": region,
                             "dma_id": m["dma_id"]
                         })
-
+                    
                     batches[region].clear()
 
                 # === Flush by timeout ===
@@ -122,6 +161,7 @@ def main():
                         if msgs:
                             insert_messages(region, msgs)
                             print(f"[Consumer] [Timeout Flush] {len(msgs)} for {region}")
+                            
                             for m in msgs:
                                 broadcast_via_api(region, m['dma_id'], {
                                     "timestamp": pd.to_datetime(m["timestamp"]).isoformat(),
@@ -129,7 +169,9 @@ def main():
                                     "region": region,
                                     "dma_id": m["dma_id"]
                                 })
+                            
                             batches[region].clear()
+                    
                     last_flush_time = time.time()
 
             except Exception as e:
@@ -147,6 +189,7 @@ def main():
                         "region": region,
                         "dma_id": m["dma_id"]
                     })
+        
         print("[Consumer] Finished.")
         event_loop.stop()
 

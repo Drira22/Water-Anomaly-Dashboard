@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket
+from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict
 import asyncio
@@ -13,10 +13,7 @@ from .kafka_controller import KafkaController
 import uvicorn
 import asyncpg
 from .websocket_manager import manager 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
-
-
 
 app = FastAPI(title="Water Flow Monitoring API", version="1.0.0")
 
@@ -111,20 +108,19 @@ async def get_flow_data(
             data = await get_flow_data_by_time_range(region, start_time, end_time)
         else:
             data = await get_latest_flow_data(region, limit)
-        
+            
         # Handle NaN values in the data
         cleaned_data = []
         for record in data:
             if record['flow'] is None or (isinstance(record['flow'], float) and math.isnan(record['flow'])):
                 record['flow'] = 0.0
             cleaned_data.append(record)
-        
+            
         return {"success": True, "data": cleaned_data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 # ===== KAFKA CONTROL ENDPOINTS =====
-
 @app.get("/kafka/status")
 async def get_kafka_status():
     """Get status of Kafka producer and consumer"""
@@ -178,8 +174,8 @@ async def get_kafka_logs(service: str, lines: int = 50):
         return {"success": True, "logs": logs}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-# Add these new endpoints to your existing main.py
 
+# Add these new endpoints to your existing main.py
 @app.get("/forecast-data/{region}/{dma_id}")
 async def get_dma_forecast_data(region: str, dma_id: str, forecast_date: Optional[str] = None):
     """Get forecast data for a specific DMA and date"""
@@ -190,7 +186,7 @@ async def get_dma_forecast_data(region: str, dma_id: str, forecast_date: Optiona
             if not dates:
                 return {"success": True, "data": []}
             forecast_date = dates[0]
-        
+            
         data = await get_forecast_data(region, dma_id, forecast_date)
         return {"success": True, "data": data, "forecast_date": forecast_date}
     except Exception as e:
@@ -210,6 +206,7 @@ async def flow_websocket(websocket: WebSocket, region: str, dma_id: str):
     await websocket.accept()  # ✅ Required to establish connection
     print(f"[WebSocket] ✅ New connection: {region}_{dma_id}")
     await manager.connect(websocket, region, dma_id)
+    
     try:
         while True:
             message = await websocket.receive_text()
@@ -224,9 +221,16 @@ class BroadcastRequest(BaseModel):
     timestamp: str
     flow: float
 
+class ForecastBroadcastRequest(BaseModel):
+    region: str
+    dma_id: str
+    forecast_date: str
+    forecast_data: List[Dict]
+
 @app.post("/internal/broadcast")
 async def internal_broadcast(data: BroadcastRequest):
     message = {
+        "type": "flow_data",
         "timestamp": data.timestamp,
         "flow": data.flow,
         "region": data.region,
@@ -234,10 +238,28 @@ async def internal_broadcast(data: BroadcastRequest):
     }
     try:
         await manager.broadcast(data.region, data.dma_id, message)
-        print(f"[API Broadcast] ✅ Sent to {data.region}_{data.dma_id}")
+        print(f"[API Broadcast] ✅ Sent flow data to {data.region}_{data.dma_id}")
         return {"success": True}
     except Exception as e:
         print(f"[API Broadcast] ❌ Failed to send: {e}")
+        return {"success": False, "error": str(e)}
+
+@app.post("/internal/broadcast-forecast")
+async def internal_broadcast_forecast(data: ForecastBroadcastRequest):
+    """Broadcast forecast data via WebSocket"""
+    message = {
+        "type": "forecast_data",
+        "region": data.region,
+        "dma_id": data.dma_id,
+        "forecast_date": data.forecast_date,
+        "forecast_data": data.forecast_data
+    }
+    try:
+        await manager.broadcast(data.region, data.dma_id, message)
+        print(f"[Forecast Broadcast] ✅ Sent forecast to {data.region}_{data.dma_id}")
+        return {"success": True}
+    except Exception as e:
+        print(f"[Forecast Broadcast] ❌ Failed to send forecast: {e}")
         return {"success": False, "error": str(e)}
     
 if __name__ == "__main__":
