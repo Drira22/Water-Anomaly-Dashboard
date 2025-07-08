@@ -4,7 +4,22 @@ import { useEffect, useState, useCallback } from "react"
 import axios from "axios"
 import Plot from "react-plotly.js"
 import useWebSocket from "../hooks/useWebSocket"
-import { Select, MenuItem, Box, Typography, Card, CardContent, Chip, Grid, Alert, Button } from "@mui/material"
+import {
+  Select,
+  MenuItem,
+  Box,
+  Typography,
+  Card,
+  CardContent,
+  Chip,
+  Grid,
+  Alert,
+  Button,
+  Snackbar,
+  List,
+  ListItem,
+  ListItemText,
+} from "@mui/material"
 
 const EnhancedDashboard = () => {
   const [region, setRegion] = useState("e3")
@@ -16,6 +31,12 @@ const EnhancedDashboard = () => {
   const [realTimeData, setRealTimeData] = useState([])
   const [forecastStartTime, setForecastStartTime] = useState(null)
 
+  // Real-time anomaly states
+  const [realtimeAnomalies, setRealtimeAnomalies] = useState([])
+  const [historicalAnomalies, setHistoricalAnomalies] = useState([]) // NEW: Track historical anomalies
+  const [anomalyAlert, setAnomalyAlert] = useState(null)
+  const [showAnomalySnackbar, setShowAnomalySnackbar] = useState(false)
+
   // UI states
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -24,6 +45,8 @@ const EnhancedDashboard = () => {
     forecastCount: 0,
     realTimeCount: 0,
     daysSinceStart: 0,
+    realtimeAnomalyCount: 0,
+    totalAnomalyCount: 0, // NEW: Total anomalies for entire DMA
   })
 
   // Helper functions for date manipulation
@@ -157,6 +180,22 @@ const EnhancedDashboard = () => {
   const handleDayTransition = useCallback(() => {
     console.log("🌅 Day transition detected - implementing sliding window...")
 
+    // Move today's anomalies to historical anomalies
+    setHistoricalAnomalies((prevHistorical) => {
+      setRealtimeAnomalies((prevRealtime) => {
+        const newHistoricalAnomalies = [...prevHistorical, ...prevRealtime]
+        console.log(`📊 Moved ${prevRealtime.length} anomalies to historical`)
+        return [] // Clear real-time anomalies for new day
+      })
+      return prevHistorical
+    })
+
+    // Reset real-time anomaly count for new day
+    setDataStats((prev) => ({
+      ...prev,
+      realtimeAnomalyCount: 0,
+    }))
+
     // Move yesterday's real-time data to historical data (immediate UI update)
     setHistoricalData((prevHistorical) => {
       setRealTimeData((prevRealTime) => {
@@ -216,7 +255,7 @@ const EnhancedDashboard = () => {
     loadData()
   }, [fetchHistoricalData, fetchForecastData, calculateDaysSinceStart])
 
-  // Handle real-time WebSocket data (both flow and forecast)
+  // Handle real-time WebSocket data (flow, forecast, and real-time anomaly)
   const handleWebSocketMessage = useCallback(
     (data) => {
       console.log("📡 WebSocket message received:", data)
@@ -265,6 +304,49 @@ const EnhancedDashboard = () => {
         }))
 
         console.log(`✅ Automatically updated forecast with ${forecast.length} points`)
+      } else if (data.type === "realtime_anomaly") {
+        // Handle real-time anomaly detection
+        console.log("🚨 REAL-TIME ANOMALY DETECTED via WebSocket!")
+
+        const anomalyData = data.anomaly_data
+
+        // Check if this anomaly already exists (prevent duplicates)
+        setRealtimeAnomalies((prev) => {
+          const isDuplicate = prev.some(
+            (existing) =>
+              existing.timestamp === anomalyData.timestamp &&
+              Math.abs(existing.actual_flow - anomalyData.actual_flow) < 0.01,
+          )
+
+          if (isDuplicate) {
+            console.log("🔄 Duplicate anomaly detected, skipping...")
+            return prev
+          }
+
+          const newAnomaly = {
+            id: `${anomalyData.timestamp}_${anomalyData.actual_flow}`, // Unique ID
+            ...anomalyData,
+          }
+
+          const updated = [newAnomaly, ...prev].slice(0, 50) // Keep last 50 anomalies
+
+          // Update stats - increment both daily and total counts
+          setDataStats((prevStats) => ({
+            ...prevStats,
+            realtimeAnomalyCount: prevStats.realtimeAnomalyCount + 1,
+            totalAnomalyCount: prevStats.totalAnomalyCount + 1,
+          }))
+
+          return updated
+        })
+
+        // Show snackbar alert
+        setAnomalyAlert(anomalyData)
+        setShowAnomalySnackbar(true)
+
+        console.log(
+          `🚨 Real-time anomaly: Actual=${anomalyData.actual_flow.toFixed(2)}, Forecast=${anomalyData.forecast_flow.toFixed(2)}`,
+        )
       }
     },
     [handleDayTransition],
@@ -342,6 +424,48 @@ const EnhancedDashboard = () => {
     })
   }
 
+  // Add historical anomaly points (from previous days)
+  if (historicalAnomalies.length > 0) {
+    plotData.push({
+      x: historicalAnomalies.map((a) => a.timestamp),
+      y: historicalAnomalies.map((a) => a.actual_flow),
+      type: "scatter",
+      mode: "markers",
+      name: `🚨 Historical Anomalies (${historicalAnomalies.length})`,
+      marker: {
+        color: "#8B0000", // Dark red for historical
+        size: 8,
+        symbol: "x",
+        line: {
+          color: "#ffffff",
+          width: 1,
+        },
+      },
+      hovertemplate: "<b>🚨 HISTORICAL ANOMALY</b><br>Time: %{x}<br>Actual: %{y:.2f} L/min<extra></extra>",
+    })
+  }
+
+  // Add real-time anomaly points (today only)
+  if (realtimeAnomalies.length > 0) {
+    plotData.push({
+      x: realtimeAnomalies.map((a) => a.timestamp),
+      y: realtimeAnomalies.map((a) => a.actual_flow),
+      type: "scatter",
+      mode: "markers",
+      name: `🚨 Today's Anomalies (${realtimeAnomalies.length})`,
+      marker: {
+        color: "#d62728", // Bright red for today
+        size: 10,
+        symbol: "x",
+        line: {
+          color: "#ffffff",
+          width: 2,
+        },
+      },
+      hovertemplate: "<b>🚨 TODAY'S ANOMALY</b><br>Time: %{x}<br>Actual: %{y:.2f} L/min<extra></extra>",
+    })
+  }
+
   // Forecast start marker (red vertical line)
   const shapes = []
   if (forecastStartTime) {
@@ -383,12 +507,14 @@ const EnhancedDashboard = () => {
   return (
     <Box sx={{ padding: 4 }}>
       <Typography variant="h4" gutterBottom sx={{ mb: 3 }}>
-        💧 Enhanced Water Flow Dashboard (Sliding Window)
+        💧 Enhanced Water Flow Dashboard (Real-time Anomaly Detection)
       </Typography>
 
-      {error && (
+      {/* Real-time Anomaly Alert */}
+      {realtimeAnomalies.length > 0 && (
         <Alert severity="error" sx={{ mb: 3 }}>
-          {error}
+          🚨 <strong>{realtimeAnomalies.length} Real-time Anomalies Detected Today!</strong> Latest at{" "}
+          {new Date(realtimeAnomalies[0].timestamp).toLocaleTimeString()}
         </Alert>
       )}
 
@@ -418,6 +544,13 @@ const EnhancedDashboard = () => {
               />
             </Grid>
             <Grid item>
+              <Chip
+                label={`Real-time Anomaly Detection: ${forecastData.length > 0 ? "Active" : "Waiting for forecast"}`}
+                color={forecastData.length > 0 ? "success" : "warning"}
+                variant="outlined"
+              />
+            </Grid>
+            <Grid item>
               <Button variant="outlined" onClick={handleRefresh} disabled={loading} size="small">
                 🔄 Manual Refresh (Debug)
               </Button>
@@ -433,7 +566,7 @@ const EnhancedDashboard = () => {
 
       {/* Statistics */}
       <Grid container spacing={2} sx={{ mb: 3 }}>
-        <Grid item xs={12} sm={3}>
+        <Grid item xs={12} sm={2}>
           <Card>
             <CardContent sx={{ textAlign: "center" }}>
               <Typography variant="h6" color="primary">
@@ -445,7 +578,7 @@ const EnhancedDashboard = () => {
             </CardContent>
           </Card>
         </Grid>
-        <Grid item xs={12} sm={3}>
+        <Grid item xs={12} sm={2}>
           <Card>
             <CardContent sx={{ textAlign: "center" }}>
               <Typography variant="h6" color="warning.main">
@@ -457,7 +590,7 @@ const EnhancedDashboard = () => {
             </CardContent>
           </Card>
         </Grid>
-        <Grid item xs={12} sm={3}>
+        <Grid item xs={12} sm={2}>
           <Card>
             <CardContent sx={{ textAlign: "center" }}>
               <Typography variant="h6" color="success.main">
@@ -469,7 +602,7 @@ const EnhancedDashboard = () => {
             </CardContent>
           </Card>
         </Grid>
-        <Grid item xs={12} sm={3}>
+        <Grid item xs={12} sm={2}>
           <Card>
             <CardContent sx={{ textAlign: "center" }}>
               <Typography variant="h6" color="info.main">
@@ -477,6 +610,30 @@ const EnhancedDashboard = () => {
               </Typography>
               <Typography variant="body2" color="textSecondary">
                 Total Days Since Start
+              </Typography>
+            </CardContent>
+          </Card>
+        </Grid>
+        <Grid item xs={12} sm={2}>
+          <Card>
+            <CardContent sx={{ textAlign: "center" }}>
+              <Typography variant="h6" color="error.main">
+                {dataStats.realtimeAnomalyCount}
+              </Typography>
+              <Typography variant="body2" color="textSecondary">
+                Anomalies Today
+              </Typography>
+            </CardContent>
+          </Card>
+        </Grid>
+        <Grid item xs={12} sm={2}>
+          <Card>
+            <CardContent sx={{ textAlign: "center" }}>
+              <Typography variant="h6" color="secondary.main">
+                {dataStats.totalAnomalyCount}
+              </Typography>
+              <Typography variant="body2" color="textSecondary">
+                Total Anomalies (All Time)
               </Typography>
             </CardContent>
           </Card>
@@ -490,7 +647,7 @@ const EnhancedDashboard = () => {
             data={plotData}
             layout={{
               title: {
-                text: `Water Flow Forecast - ${region.toUpperCase()} DMA ${dmaId} (Auto-Sliding Window)`,
+                text: `Water Flow Forecast - ${region.toUpperCase()} DMA ${dmaId} (Real-time Anomaly Detection)`,
                 font: { size: 18 },
               },
               xaxis: {
@@ -541,14 +698,48 @@ const EnhancedDashboard = () => {
         </CardContent>
       </Card>
 
+      {/* Real-time Anomaly History */}
+      {realtimeAnomalies.length > 0 && (
+        <Card sx={{ mt: 2 }}>
+          <CardContent>
+            <Typography variant="h6" gutterBottom>
+              🚨 Real-time Anomaly Detection Log (Today)
+            </Typography>
+            <Box sx={{ maxHeight: 300, overflow: "auto" }}>
+              <List>
+                {realtimeAnomalies.slice(0, 10).map((anomaly) => (
+                  <ListItem key={anomaly.id} divider>
+                    <ListItemText
+                      primary={
+                        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                          <Typography variant="body1" color="error">
+                            🚨 ANOMALY #{anomaly.anomaly_count_today}
+                          </Typography>
+                        </Box>
+                      }
+                      secondary={
+                        <Typography variant="body2" color="textSecondary">
+                          Time: {new Date(anomaly.timestamp).toLocaleString()} | Actual:{" "}
+                          {anomaly.actual_flow.toFixed(2)} L/min | Forecast: {anomaly.forecast_flow.toFixed(2)} L/min
+                        </Typography>
+                      }
+                    />
+                  </ListItem>
+                ))}
+              </List>
+            </Box>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Legend Explanation */}
       <Card sx={{ mt: 2 }}>
         <CardContent>
           <Typography variant="h6" gutterBottom>
-            Chart Legend - Auto-Sliding Window (7 days = 672 points)
+            Chart Legend - Real-time Point-by-Point Anomaly Detection
           </Typography>
           <Grid container spacing={2}>
-            <Grid item xs={12} sm={4}>
+            <Grid item xs={12} sm={3}>
               <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
                 <Box sx={{ width: 20, height: 3, bgcolor: "#1f77b4" }} />
                 <Typography variant="body2">
@@ -556,7 +747,7 @@ const EnhancedDashboard = () => {
                 </Typography>
               </Box>
             </Grid>
-            <Grid item xs={12} sm={4}>
+            <Grid item xs={12} sm={3}>
               <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
                 <Box
                   sx={{
@@ -573,17 +764,53 @@ const EnhancedDashboard = () => {
                 </Typography>
               </Box>
             </Grid>
-            <Grid item xs={12} sm={4}>
+            <Grid item xs={12} sm={3}>
               <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
                 <Box sx={{ width: 20, height: 3, bgcolor: "#2ca02c" }} />
                 <Typography variant="body2">
-                  <strong>True Future:</strong> Today's live data - Moves to Past at midnight
+                  <strong>True Future:</strong> Today's live data - Compared to forecast in real-time
+                </Typography>
+              </Box>
+            </Grid>
+            <Grid item xs={12} sm={3}>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                <Box
+                  sx={{
+                    width: 20,
+                    height: 20,
+                    bgcolor: "#d62728",
+                    borderRadius: "50%",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    color: "white",
+                    fontSize: "12px",
+                  }}
+                >
+                  ✕
+                </Box>
+                <Typography variant="body2">
+                  <strong>Real-time Anomalies:</strong> |actual - forecast| &gt; 5.0 L/min (instant alerts)
                 </Typography>
               </Box>
             </Grid>
           </Grid>
         </CardContent>
       </Card>
+
+      {/* Anomaly Snackbar */}
+      <Snackbar
+        open={showAnomalySnackbar}
+        autoHideDuration={6000}
+        onClose={() => setShowAnomalySnackbar(false)}
+        anchorOrigin={{ vertical: "top", horizontal: "right" }}
+      >
+        <Alert onClose={() => setShowAnomalySnackbar(false)} severity="error" sx={{ width: "100%" }}>
+          🚨 <strong>Real-time Anomaly Detected!</strong>
+          <br />
+          At {new Date(anomalyAlert?.timestamp).toLocaleTimeString()}
+        </Alert>
+      </Snackbar>
     </Box>
   )
 }

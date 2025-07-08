@@ -3,7 +3,8 @@ from kafka_app.consumer.utils import parse_kafka_message, extract_region_from_me
 from kafka_app.consumer.db import create_table_if_missing, insert_messages, get_historical_data, insert_forecast
 from kafka_app.consumer.config import KAFKA_CONFIG
 from kafka_app.forecasting.model_service import forecasting_service
-from dashboard.backend.websocket_manager import manager  # ✅ Use the new manager
+from kafka_app.anomaly.realtime_anomaly_detector import realtime_detector
+from dashboard.backend.websocket_manager import manager
 import requests
 import asyncio
 import time
@@ -68,10 +69,27 @@ def broadcast_forecast_via_api(region: str, dma_id: str, forecast_data: list, fo
     except Exception as e:
         print(f"[Forecast Broadcast] ❌ Exception: {e}")
 
+def broadcast_realtime_anomaly_via_api(region: str, dma_id: str, anomaly_data: dict):
+    """Broadcast real-time anomaly detection via WebSocket"""
+    try:
+        response = requests.post(
+            "http://localhost:8000/internal/broadcast-realtime-anomaly",
+            json={
+                "region": region,
+                "dma_id": dma_id,
+                "anomaly_data": anomaly_data
+            },
+            timeout=2
+        )
+        if response.status_code == 200:
+            print(f"[Real-time Anomaly] ✅ Sent anomaly alert to {region}_{dma_id}")
+        else:
+            print(f"[Real-time Anomaly] ❌ Failed: {response.status_code} {response.text}")
+    except Exception as e:
+        print(f"[Real-time Anomaly] ❌ Exception: {e}")
+
 def main():
-    print("[Consumer] Starting DMA consumer with forecasting + WebSocket...")
-    # ✅ Wait a few seconds to allow frontend WebSocket clients to connect
-    print("⏳ Waiting 3 seconds for WebSocket clients to connect...")
+    print("[Consumer] Starting DMA consumer with real-time anomaly detection...")
     time.sleep(3)
 
     consumer = KafkaConsumer(**{k: v for k, v in KAFKA_CONFIG.items() if k != 'topic_pattern'})
@@ -101,6 +119,9 @@ def main():
                 if should_trigger_forecast(msg['timestamp']):
                     print(f"🔮 Forecast triggered for DMA {msg['dma_id']} at {msg['timestamp']}")
                     
+                    # Reset anomaly count for new day
+                    realtime_detector.reset_daily_count(region, msg['dma_id'])
+                    
                     if forecasting_service.is_model_ready():
                         historical = get_historical_data(region, msg['dma_id'], 672)
                         
@@ -111,11 +132,11 @@ def main():
                                 future_timestamps = generate_forecast_timestamps(msg['timestamp'])
                                 forecast_data = list(zip(future_timestamps, forecasts))
                                 
-                                # Save to database
+                                # Save to database (this is where the forecast gets stored!)
                                 insert_forecast(region, msg['dma_id'], pd.to_datetime(msg['timestamp']).date(), forecast_data)
-                                print(f"✅ Forecast saved for {msg['dma_id']}")
+                                print(f"✅ Forecast saved to database for {msg['dma_id']}")
                                 
-                                # 🚀 NEW: Broadcast forecast data via WebSocket
+                                # Prepare forecast for broadcast
                                 forecast_for_broadcast = [
                                     {
                                         "timestamp": ts.isoformat(),
@@ -124,18 +145,35 @@ def main():
                                     for ts, flow in forecast_data
                                 ]
                                 
+                                # Broadcast forecast data via WebSocket
                                 broadcast_forecast_via_api(
                                     region, 
                                     msg['dma_id'], 
                                     forecast_for_broadcast,
                                     str(pd.to_datetime(msg['timestamp']).date())
                                 )
+                                
+                                print(f"📊 Real-time anomaly detection now active for {region}_{msg['dma_id']}")
                             else:
                                 print(f"❌ Forecast failed for {msg['dma_id']}")
                         else:
                             print(f"⚠️ Not enough history ({len(historical)}/672) for {msg['dma_id']}")
                     else:
                         print("❌ Model not ready")
+
+                # === Real-time Anomaly Detection ===
+                # Check EVERY incoming data point for anomalies (reads forecast from database)
+                anomaly_result = realtime_detector.check_anomaly(
+                    region, 
+                    msg['dma_id'], 
+                    msg['timestamp'], 
+                    msg['flow']
+                )
+                
+                if anomaly_result:
+                    print(f"🚨 REAL-TIME ANOMALY: {anomaly_result}")
+                    # Broadcast anomaly immediately
+                    broadcast_realtime_anomaly_via_api(region, msg['dma_id'], anomaly_result)
 
                 # === Add to batch ===
                 batches[region].append(msg)

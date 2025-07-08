@@ -261,6 +261,29 @@ async def internal_broadcast_forecast(data: ForecastBroadcastRequest):
     except Exception as e:
         print(f"[Forecast Broadcast] ❌ Failed to send forecast: {e}")
         return {"success": False, "error": str(e)}
+class RealtimeAnomalyBroadcastRequest(BaseModel):
+    region: str
+    dma_id: str
+    anomaly_data: Dict
+
+
+
+@app.post("/internal/broadcast-realtime-anomaly")
+async def internal_broadcast_realtime_anomaly(data: RealtimeAnomalyBroadcastRequest):
+    """Broadcast real-time anomaly detection results via WebSocket"""
+    message = {
+        "type": "realtime_anomaly",
+        "region": data.region,
+        "dma_id": data.dma_id,
+        "anomaly_data": data.anomaly_data
+    }
+    try:
+        await manager.broadcast(data.region, data.dma_id, message)
+        print(f"[Real-time Anomaly Broadcast] ✅ Sent anomaly alert to {data.region}_{data.dma_id}")
+        return {"success": True}
+    except Exception as e:
+        print(f"[Real-time Anomaly Broadcast] ❌ Failed to send anomaly: {e}")
+        return {"success": False, "error": str(e)}
     
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
